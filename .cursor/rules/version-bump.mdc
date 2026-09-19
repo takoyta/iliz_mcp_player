@@ -1,0 +1,14 @@
+---
+description: Bump APP_VERSION on every code change
+alwaysApply: true
+---
+
+# Version bump
+
+Every time you change player source, resources, or build scripts, bump the version in `src/appinfo.h` (`APP_VER_*`, `APP_VERSION_A`) before finishing.
+
+- Patch (`x.y.Z`): bugfixes, polish, tiny UI tweaks
+- Minor (`x.Y.0`): new features or user-visible behavior
+- Major (`X.0.0`): breaking changes or major redesign
+
+Do not leave a changed build with the same version string as the previous one.

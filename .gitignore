@@ -1,0 +1,24 @@
+# Build output
+bin/
+dist/
+*.obj
+*.o
+*.pdb
+*.ilk
+*.exp
+*.idb
+*.ipdb
+*.iobj
+*.map
+
+__pycache__/
+*.pyc
+
+# IDE / OS
+.vs/
+*.user
+*.suo
+*.sln.docstates
+Thumbs.db
+Desktop.ini
+.DS_Store
