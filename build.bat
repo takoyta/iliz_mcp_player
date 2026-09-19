@@ -10,7 +10,9 @@ cd /d "%ROOT%bin"
 rc /nologo /I"%ROOT%src" /foiliz_mcp_player.res "%ROOT%src\app.rc" || exit /b 1
 
 cl /nologo /std:c++17 /O1 /Os /GS- /Gy /GR- /EHs-c- /W3 /DUNICODE /D_UNICODE ^
-   /I"%ROOT%lib" /I"%ROOT%src" /Fe:iliz_mcp_player.exe "%ROOT%src\main.cpp" iliz_mcp_player.res ^
+   /I"%ROOT%lib" /I"%ROOT%src" /Fe:iliz_mcp_player.exe ^
+   "%ROOT%src\util.cpp" "%ROOT%src\player.cpp" "%ROOT%src\http.cpp" "%ROOT%src\ui.cpp" "%ROOT%src\main.cpp" ^
+   iliz_mcp_player.res ^
    /link /SUBSYSTEM:WINDOWS /ENTRY:AppEntry /NODEFAULTLIB /OPT:REF /OPT:ICF ^
    /MANIFEST:NO "%ROOT%lib\bass64.lib" kernel32.lib user32.lib gdi32.lib advapi32.lib shell32.lib ws2_32.lib || exit /b 1
 

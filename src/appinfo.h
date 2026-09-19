@@ -2,9 +2,9 @@
 
 #define APP_VER_MAJOR 0
 #define APP_VER_MINOR 9
-#define APP_VER_PATCH 1
+#define APP_VER_PATCH 2
 
-#define APP_VERSION_A   "0.9.1"
+#define APP_VERSION_A   "0.9.2"
 #define HTTP_PORT       17321
 #define IDI_APP         1
 #define APP_NAME_A      "iliz MCP player"
