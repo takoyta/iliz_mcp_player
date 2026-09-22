@@ -1,23 +1,4 @@
 #include "util.h"
-
-extern "C" int _fltused = 1;
-
-#pragma function(memset)
-extern "C" void *memset(void *dst, int c, size_t n)
-{
-    unsigned char *p = (unsigned char *)dst;
-    while (n--) *p++ = (unsigned char)c;
-    return dst;
-}
-
-#pragma function(memcpy)
-extern "C" void *memcpy(void *dst, const void *src, size_t n)
-{
-    unsigned char *d = (unsigned char *)dst;
-    const unsigned char *s = (const unsigned char *)src;
-    while (n--) *d++ = *s++;
-    return dst;
-}
 int S(int v) { return MulDiv(v, g_dpi, 96); }
 int Abs(int v) { return v < 0 ? -v : v; }
 

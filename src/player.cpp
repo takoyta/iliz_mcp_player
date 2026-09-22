@@ -1,6 +1,10 @@
 #include "player.h"
 #include "util.h"
 #include "ui.h"
+#include "store.h"
+#include "tags.h"
+#include "media.h"
+#include <string.h>
 
 void ApplyVol()
 {
@@ -49,17 +53,20 @@ void EnsureVisible(int i)
     ClampScroll();
 }
 
-static void PlaceSearch()
+static void CenterIfHidden(int i)
 {
-    if (!g_search)
-        return;
     Layout l;
     GetLayout(&l);
-    int inset = S(26);
-    int y = l.search.top + S(2);
-    int h = l.search.bottom - l.search.top - S(4);
-    MoveWindow(g_search, l.search.left + inset, y,
-               l.search.right - l.search.left - inset - S(22), h, TRUE);
+    int vis = VisibleRows(&l);
+    if (vis <= 0)
+        return;
+    int p = ViewIndex(i);
+    if (p < 0)
+        return;
+    if (p >= g_scroll && p < g_scroll + vis)
+        return;
+    g_scroll = p - vis / 2;
+    ClampScroll();
 }
 
 void RebuildView(BOOL reset_scroll)
@@ -71,9 +78,29 @@ void RebuildView(BOOL reset_scroll)
         return;
     }
     g_view_n = 0;
-    for (int i = 0; i < g_count; ++i) {
-        if (ContainsI(FileName(g_tracks[i].path), g_filter))
-            g_view[g_view_n++] = i;
+    if (!g_filter[0]) {
+        g_view_n = CollectQueue(g_view);
+    } else {
+        int ids[MAX_TRACKS];
+        int total = 0;
+        int n = StoreSearch(g_filter, ids, MAX_TRACKS, &total);
+        for (int i = 0; i < n; ++i) {
+            int ix = IndexById(ids[i]);
+            if (ix >= 0)
+                g_view[g_view_n++] = ix;
+        }
+    }
+    if (g_liked_only || g_played_only) {
+        int n = 0;
+        for (int i = 0; i < g_view_n; ++i) {
+            int t = g_view[i];
+            if (g_liked_only && !g_tracks[t].liked)
+                continue;
+            if (g_played_only && g_tracks[t].plays <= 0)
+                continue;
+            g_view[n++] = t;
+        }
+        g_view_n = n;
     }
     if (g_view_n > 0 && ViewIndex(g_sel) < 0)
         g_sel = g_view[0];
@@ -87,7 +114,76 @@ void FilterChanged()
     if (g_search)
         GetWindowTextW(g_search, g_filter, 128);
     RebuildView(TRUE);
+    if (g_sel >= 0 && g_sel < g_count)
+        PickOnly(g_sel);
     InvalidateRect(g_wnd, 0, FALSE);
+}
+
+static int g_anchor = -1;
+
+static void ClearPicked()
+{
+    for (int i = 0; i < g_count; ++i)
+        g_tracks[i].picked = 0;
+}
+
+int PickedCount()
+{
+    int n = 0;
+    for (int i = 0; i < g_count; ++i)
+        n += g_tracks[i].picked != 0;
+    return n;
+}
+
+void PickOnly(int i)
+{
+    ClearPicked();
+    if (i < 0 || i >= g_count)
+        return;
+    g_tracks[i].picked = 1;
+    g_sel = i;
+    g_anchor = i;
+}
+
+void PickToggle(int i)
+{
+    if (i < 0 || i >= g_count)
+        return;
+    g_tracks[i].picked = !g_tracks[i].picked;
+    g_sel = i;
+    g_anchor = i;
+}
+
+void PickRange(int i)
+{
+    if (i < 0 || i >= g_count)
+        return;
+    int a = ViewIndex(g_anchor);
+    int b = ViewIndex(i);
+    if (b < 0)
+        return;
+    if (a < 0)
+        a = b;
+    if (a > b) {
+        int t = a;
+        a = b;
+        b = t;
+    }
+    ClearPicked();
+    for (int v = a; v <= b; ++v)
+        g_tracks[g_view[v]].picked = 1;
+    g_sel = i;
+}
+
+void PickAllView()
+{
+    ClearPicked();
+    for (int v = 0; v < g_view_n; ++v)
+        g_tracks[g_view[v]].picked = 1;
+    if (g_view_n > 0 && ViewIndex(g_sel) < 0)
+        g_sel = g_view[0];
+    if (g_sel >= 0)
+        g_anchor = g_sel;
 }
 
 void MoveSelBy(int delta)
@@ -99,6 +195,10 @@ void MoveSelBy(int delta)
         p = 0;
     p = Clamp(p + delta, 0, g_view_n - 1);
     g_sel = g_view[p];
+    if (GetKeyState(VK_SHIFT) & 0x8000)
+        PickRange(g_sel);
+    else
+        PickOnly(g_sel);
     EnsureVisible(g_sel);
 }
 
@@ -228,7 +328,13 @@ static int BitrateOf(HSTREAM s)
     return 0;
 }
 
-void ProbePending()
+static void CALLBACK StreamEnded(HSYNC, DWORD, DWORD, void *)
+{
+    if (g_wnd)
+        PostMessageW(g_wnd, WM_TRACK_END, 0, 0);
+}
+
+int ProbePending()
 {
     int n = 0;
     Layout l;
@@ -241,15 +347,18 @@ void ProbePending()
         int t = g_view[i];
         if (g_tracks[t].secs < 0) {
             g_tracks[t].secs = ProbeSecs(g_tracks[t].path);
+            StoreSetSecs(g_tracks[t].id, g_tracks[t].secs);
             n++;
         }
     }
     for (int i = 0; i < g_count && n < 6; ++i) {
-        if (g_tracks[i].secs < 0) {
+        if (g_tracks[i].pos >= 0 && g_tracks[i].secs < 0) {
             g_tracks[i].secs = ProbeSecs(g_tracks[i].path);
+            StoreSetSecs(g_tracks[i].id, g_tracks[i].secs);
             n++;
         }
     }
+    return n;
 }
 
 static void ShowPlayError(const wchar_t *path)
@@ -302,10 +411,39 @@ static BOOL Grow()
 static int FindPath(const wchar_t *path)
 {
     for (int i = 0; i < g_count; ++i) {
-        if (EqI(g_tracks[i].path, path))
+        if (!lstrcmpiW(g_tracks[i].path, path))
             return i;
     }
     return -1;
+}
+
+static int MaxPos()
+{
+    int m = -1;
+    for (int i = 0; i < g_count; ++i) {
+        if (g_tracks[i].pos > m)
+            m = g_tracks[i].pos;
+    }
+    return m;
+}
+
+int CollectQueue(int *out)
+{
+    int n = 0;
+    for (int i = 0; i < g_count; ++i) {
+        if (g_tracks[i].pos >= 0)
+            out[n++] = i;
+    }
+    for (int a = 0; a < n; ++a) {
+        for (int b = a + 1; b < n; ++b) {
+            if (g_tracks[out[b]].pos < g_tracks[out[a]].pos) {
+                int x = out[a];
+                out[a] = out[b];
+                out[b] = x;
+            }
+        }
+    }
+    return n;
 }
 
 static int AddTrack(const wchar_t *path)
@@ -313,12 +451,25 @@ static int AddTrack(const wchar_t *path)
     if (!path || !path[0] || !IsAudio(path))
         return -1;
     int exist = FindPath(path);
-    if (exist >= 0)
+    if (exist >= 0) {
+        if (g_tracks[exist].pos < 0) {
+            g_tracks[exist].pos = MaxPos() + 1;
+            StoreUpsert(&g_tracks[exist]);
+        }
         return exist;
+    }
     if (!Grow())
         return -1;
-    Copy(g_tracks[g_count].path, path, MAX_PATH);
-    g_tracks[g_count].secs = -1;
+    Track *t = &g_tracks[g_count];
+    memset(t, 0, sizeof(Track));
+    Copy(t->path, path, MAX_PATH);
+    t->secs = -1;
+    t->pos = MaxPos() + 1;
+    if (GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES)
+        ReadTags(path, t->title, t->artist, t->album, META_CAP);
+    if (!t->title[0])
+        FillFromFileName(t);
+    StoreUpsert(t);
     if (g_sel < 0)
         g_sel = g_count;
     return g_count++;
@@ -371,129 +522,27 @@ int AddPath(const wchar_t *path)
         AddTrack(path);
     if (!g_loading)
         RebuildView(FALSE);
+    if (g_count > before)
+        ArmTimer();
     return g_count - before;
-}
-
-static BOOL WriteBytes(HANDLE f, const void *p, DWORD n)
-{
-    DWORD w = 0;
-    return WriteFile(f, p, n, &w, 0) && w == n;
-}
-
-static BOOL WriteStr(HANDLE f, const char *s)
-{
-    int n = 0;
-    while (s[n]) ++n;
-    return WriteBytes(f, s, (DWORD)n);
-}
-
-static BOOL PlaylistPath(wchar_t *out)
-{
-    if (!GetEnvironmentVariableW(L"APPDATA", out, MAX_PATH))
-        return FALSE;
-    Append(out, MAX_PATH, L"\\iliz");
-    CreateDirectoryW(out, 0);
-    Append(out, MAX_PATH, L"\\iliz_mcp_player");
-    CreateDirectoryW(out, 0);
-    Append(out, MAX_PATH, L"\\playlist.m3u8");
-    return TRUE;
 }
 
 void SavePlaylist()
 {
-    if (g_loading)
-        return;
-    wchar_t path[MAX_PATH];
-    if (!PlaylistPath(path))
-        return;
-    HANDLE f = CreateFileW(path, GENERIC_WRITE, 0, 0, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, 0);
-    if (f == INVALID_HANDLE_VALUE)
-        return;
-    WriteStr(f, "#EXTM3U\r\n");
-    for (int i = 0; i < g_count; ++i) {
-        WriteStr(f, "#EXTINF:");
-        int secs = g_tracks[i].secs;
-        if (secs < 0)
-            secs = 0;
-        char num[12];
-        int n = 0, v = secs;
-        char tmp[12];
-        int t = 0;
-        if (v == 0)
-            tmp[t++] = '0';
-        while (v && t < 11) {
-            tmp[t++] = (char)('0' + v % 10);
-            v /= 10;
-        }
-        while (t)
-            num[n++] = tmp[--t];
-        num[n] = 0;
-        WriteStr(f, num);
-        WriteStr(f, ",\r\n");
-        char utf[MAX_PATH * 3];
-        int bytes = WideCharToMultiByte(CP_UTF8, 0, g_tracks[i].path, -1, utf, sizeof(utf), 0, 0);
-        if (bytes > 1)
-            WriteBytes(f, utf, (DWORD)(bytes - 1));
-        WriteStr(f, "\r\n");
-    }
-    CloseHandle(f);
+    StoreSaveQueue();
 }
 
 void LoadPlaylist()
 {
-    wchar_t path[MAX_PATH];
-    if (!PlaylistPath(path))
-        return;
-    HANDLE f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, 0, OPEN_EXISTING, 0, 0);
-    if (f == INVALID_HANDLE_VALUE)
-        return;
-    LARGE_INTEGER sz;
-    if (!GetFileSizeEx(f, &sz) || sz.QuadPart <= 0 || sz.QuadPart > 8 * 1024 * 1024) {
-        CloseHandle(f);
-        return;
-    }
-    DWORD n = (DWORD)sz.QuadPart;
-    char *buf = (char *)HeapAlloc(Heap(), 0, n + 1);
-    if (!buf) {
-        CloseHandle(f);
-        return;
-    }
-    DWORD got = 0;
-    if (!ReadFile(f, buf, n, &got, 0))
-        got = 0;
-    CloseHandle(f);
-    buf[got] = 0;
-
-    g_loading = TRUE;
-    DWORD i = 0;
-    if (got >= 3 && (BYTE)buf[0] == 0xEF && (BYTE)buf[1] == 0xBB && (BYTE)buf[2] == 0xBF)
-        i = 3;
-    while (i < got) {
-        DWORD start = i;
-        while (i < got && buf[i] != '\n' && buf[i] != '\r')
-            ++i;
-        DWORD len = i - start;
-        while (i < got && (buf[i] == '\n' || buf[i] == '\r'))
-            ++i;
-        if (!len || buf[start] == '#')
-            continue;
-        while (len && (buf[start + len - 1] == ' ' || buf[start + len - 1] == '\t'))
-            --len;
-        if (!len)
-            continue;
-        wchar_t item[MAX_PATH];
-        int wlen = MultiByteToWideChar(CP_UTF8, 0, buf + start, (int)len, item, MAX_PATH - 1);
-        if (wlen <= 0)
-            continue;
-        item[wlen] = 0;
-        AddTrack(item);
-    }
-    g_loading = FALSE;
-    HeapFree(Heap(), 0, buf);
+    StoreLoad();
     RebuildView(FALSE);
-    if (g_count) {
-        g_sel = Clamp(g_sel, 0, g_count - 1);
+    int q[MAX_TRACKS];
+    int n = CollectQueue(q);
+    if (n) {
+        if (g_sel < 0 || g_sel >= g_count || g_tracks[g_sel].pos < 0)
+            g_sel = q[0];
         EnsureVisible(g_sel);
+        PickOnly(g_sel);
     } else {
         g_sel = -1;
     }
@@ -521,74 +570,127 @@ BOOL PlayIndex(int i, BOOL show_err)
     g_stream = next;
     ApplyVol();
     BASS_ChannelPlay(g_stream, FALSE);
+    BASS_ChannelSetSync(g_stream, BASS_SYNC_END, 0, StreamEnded, 0);
     g_cur = i;
-    g_sel = i;
+    g_tracks[i].plays++;
+    StoreBumpPlays(g_tracks[i].id);
+    if (PickedCount() <= 1)
+        PickOnly(i);
     g_kbps = BitrateOf(g_stream);
+    g_bytes = 0;
+    WIN32_FILE_ATTRIBUTE_DATA fad;
+    if (GetFileAttributesExW(path, GetFileExInfoStandard, &fad)) {
+        ULARGE_INTEGER u;
+        u.LowPart = fad.nFileSizeLow;
+        u.HighPart = fad.nFileSizeHigh;
+        g_bytes = u.QuadPart;
+    }
     QWORD bytes = BASS_ChannelGetLength(g_stream, BASS_POS_BYTE);
-    if (bytes && bytes != (QWORD)-1)
+    if (bytes && bytes != (QWORD)-1) {
         g_tracks[i].secs = (int)BASS_ChannelBytes2Seconds(g_stream, bytes);
-    Copy(g_title, FileName(path), MAX_PATH);
+        StoreSetSecs(g_tracks[i].id, g_tracks[i].secs);
+    }
+    Copy(g_title, TrackTitle(&g_tracks[i]), MAX_PATH);
     SetWindowTextW(g_wnd, g_title);
     TrayTip();
-    EnsureVisible(i);
+    CenterIfHidden(i);
     InvalidateRect(g_wnd, 0, FALSE);
+    ArmTimer();
+    MediaSync();
     return TRUE;
+}
+
+BOOL PlayById(int id, BOOL show_err)
+{
+    int i = IndexById(id);
+    if (i < 0)
+        return FALSE;
+    if (g_tracks[i].pos < 0) {
+        g_tracks[i].pos = MaxPos() + 1;
+        StoreSaveQueue();
+        RebuildView(FALSE);
+    }
+    return PlayIndex(i, show_err);
 }
 
 BOOL PlayNext(BOOL wrap)
 {
-    if (g_count <= 0)
+    int q[MAX_TRACKS];
+    int n = CollectQueue(q);
+    if (n <= 0)
         return FALSE;
     if (g_shuffle) {
-        int tries = g_count * 2;
-        while (tries-- > 0) {
-            int i = (int)(RandU() % (unsigned)g_count);
-            if (i == g_cur && g_count > 1)
-                continue;
-            if (PlayIndex(i, FALSE))
+        int w = 0;
+        for (int i = 0; i < n; ++i) {
+            if (q[i] != g_cur)
+                q[w++] = q[i];
+        }
+        if (w <= 0)
+            return g_cur >= 0 ? PlayIndex(g_cur, FALSE) : FALSE;
+        for (int i = w - 1; i > 0; --i) {
+            int j = (int)(RandU() % (unsigned)(i + 1));
+            int t = q[i];
+            q[i] = q[j];
+            q[j] = t;
+        }
+        for (int i = 0; i < w; ++i) {
+            if (PlayIndex(q[i], FALSE))
                 return TRUE;
         }
         return FALSE;
     }
-    int start = g_cur < 0 ? 0 : g_cur + 1;
-    if (start >= g_count) {
+    int curpos = g_cur >= 0 ? g_tracks[g_cur].pos : -1;
+    int start = 0;
+    while (start < n && g_tracks[q[start]].pos <= curpos)
+        ++start;
+    if (start >= n) {
         if (!wrap)
             return FALSE;
         start = 0;
     }
-    int i = start;
+    int k = start;
     for (;;) {
-        if (PlayIndex(i, FALSE))
+        if (PlayIndex(q[k], FALSE))
             return TRUE;
-        i++;
-        if (i >= g_count)
-            i = 0;
-        if (i == start)
+        k++;
+        if (k >= n)
+            k = 0;
+        if (k == start)
             return FALSE;
     }
 }
 
-void PlayPrev()
+BOOL PlayPrev()
 {
     if (g_count <= 0)
-        return;
+        return FALSE;
     if (g_stream) {
         QWORD at = BASS_ChannelGetPosition(g_stream, BASS_POS_BYTE);
         if (BASS_ChannelBytes2Seconds(g_stream, at) > 3) {
             BASS_ChannelSetPosition(g_stream, 0, BASS_POS_BYTE);
             BASS_ChannelPlay(g_stream, FALSE);
             InvalidateRect(g_wnd, 0, FALSE);
-            return;
+            MediaSync();
+            return TRUE;
         }
     }
-    int i = g_cur <= 0 ? g_count - 1 : g_cur - 1;
-    int guard = i;
+    int q[MAX_TRACKS];
+    int n = CollectQueue(q);
+    if (n <= 0)
+        return FALSE;
+    int curpos = g_cur >= 0 ? g_tracks[g_cur].pos : 0;
+    int k = n - 1;
+    while (k >= 0 && g_tracks[q[k]].pos >= curpos)
+        --k;
+    if (k < 0)
+        k = n - 1;
+    int guard = k;
     for (;;) {
-        if (PlayIndex(i, FALSE))
-            return;
-        i = i <= 0 ? g_count - 1 : i - 1;
-        if (i == guard)
-            return;
+        if (PlayIndex(q[k], FALSE))
+            return TRUE;
+        k = k <= 0 ? n - 1 : k - 1;
+        if (k == guard)
+            return FALSE;
     }
 }
 
@@ -604,6 +706,8 @@ void TogglePause()
     else
         BASS_ChannelPlay(g_stream, FALSE);
     InvalidateRect(g_wnd, 0, FALSE);
+    ArmTimer();
+    MediaSync();
 }
 
 void StopPlayback()
@@ -614,36 +718,131 @@ void StopPlayback()
     }
     g_cur = -1;
     g_kbps = 0;
+    g_bytes = 0;
     Copy(g_title, APP_NAME, MAX_PATH);
     if (g_wnd) {
         SetWindowTextW(g_wnd, g_title);
         TrayTip();
         InvalidateRect(g_wnd, 0, FALSE);
     }
+    ArmTimer();
+    MediaSync();
 }
-void RemoveSel()
+
+void SeekBy(double delta)
 {
-    if (g_sel < 0 || g_sel >= g_count)
+    if (!g_stream)
         return;
-    int i = g_sel;
-    if (i == g_cur && g_stream) {
+    QWORD at = BASS_ChannelGetPosition(g_stream, BASS_POS_BYTE);
+    double sec = BASS_ChannelBytes2Seconds(g_stream, at) + delta;
+    if (sec < 0)
+        sec = 0;
+    BASS_ChannelSetPosition(g_stream, BASS_ChannelSeconds2Bytes(g_stream, sec), BASS_POS_BYTE);
+    InvalidateRect(g_wnd, 0, FALSE);
+}
+static void DropTrack(int i, BOOL disk)
+{
+    if (i < 0 || i >= g_count)
+        return;
+    PickOnly(i);
+    RemovePicked(disk);
+}
+
+void RemovePicked(BOOL disk)
+{
+    if (PickedCount() == 0 && g_sel >= 0 && g_sel < g_count)
+        g_tracks[g_sel].picked = 1;
+    int view_i = -1;
+    for (int v = 0; v < g_view_n; ++v) {
+        if (g_tracks[g_view[v]].picked) {
+            view_i = v;
+            break;
+        }
+    }
+    if (g_cur >= 0 && g_cur < g_count && g_tracks[g_cur].picked && g_stream) {
         BASS_StreamFree(g_stream);
         g_stream = 0;
         g_cur = -1;
         g_kbps = 0;
+        g_bytes = 0;
         Copy(g_title, APP_NAME, MAX_PATH);
         SetWindowTextW(g_wnd, g_title);
         TrayTip();
     }
-    for (int n = i; n < g_count - 1; ++n)
-        g_tracks[n] = g_tracks[n + 1];
-    g_count--;
-    if (g_cur > i)
-        g_cur--;
-    if (g_sel >= g_count)
-        g_sel = g_count - 1;
+    int fail = 0;
+    if (disk) {
+        for (int i = 0; i < g_count; ++i) {
+            if (!g_tracks[i].picked)
+                continue;
+            if (!DeleteFileW(g_tracks[i].path)) {
+                g_tracks[i].picked = 0;
+                fail++;
+            }
+        }
+    }
+    int cur_id = g_cur >= 0 ? g_tracks[g_cur].id : -1;
+    int w = 0;
+    for (int i = 0; i < g_count; ++i) {
+        Track t = g_tracks[i];
+        if (t.picked) {
+            if (t.liked && !disk) {
+                t.pos = -1;
+                t.picked = 0;
+                g_tracks[w++] = t;
+            } else {
+                StoreDelete(t.id);
+            }
+            continue;
+        }
+        t.picked = 0;
+        g_tracks[w++] = t;
+    }
+    g_count = w;
+    g_cur = cur_id > 0 ? IndexById(cur_id) : -1;
+    StoreSaveQueue();
     RebuildView(FALSE);
+    if (g_view_n <= 0)
+        g_sel = -1;
+    else if (view_i >= 0) {
+        if (view_i >= g_view_n)
+            view_i = g_view_n - 1;
+        PickOnly(g_view[view_i]);
+        EnsureVisible(g_sel);
+    }
     ClampScroll();
-    SavePlaylist();
+    if (fail)
+        MessageBoxW(g_wnd, L"Could not delete some files.", APP_NAME, MB_OK | MB_ICONERROR);
+    InvalidateRect(g_wnd, 0, FALSE);
+    ArmTimer();
+}
+
+void RemoveTrack(int i)
+{
+    DropTrack(i, FALSE);
+}
+
+void RemoveSel()
+{
+    RemovePicked(FALSE);
+}
+
+void ToggleLike(int i)
+{
+    if (i < 0 || i >= g_count)
+        return;
+    SetLike(i, !g_tracks[i].liked);
+}
+
+void SetLike(int i, int liked)
+{
+    if (i < 0 || i >= g_count)
+        return;
+    liked = liked ? 1 : 0;
+    if (g_tracks[i].liked == liked)
+        return;
+    g_tracks[i].liked = liked;
+    StoreSetLiked(g_tracks[i].id, liked);
+    if (g_liked_only)
+        RebuildView(FALSE);
     InvalidateRect(g_wnd, 0, FALSE);
 }

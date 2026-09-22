@@ -1,6 +1,7 @@
 #include "http.h"
 #include "util.h"
 #include "player.h"
+#include "store.h"
 
 static void JPut(HttpJob *j, const char *s)
 {
@@ -76,13 +77,21 @@ static void JErr(HttpJob *j, const char *err)
 static void TrackJson(HttpJob *j, int i)
 {
     JPut(j, "{\"id\":");
-    JInt(j, i);
+    JInt(j, g_tracks[i].id);
     JPut(j, ",\"title\":");
-    JWstr(j, FileName(g_tracks[i].path));
+    JWstr(j, TrackTitle(&g_tracks[i]));
     if (!j->slim) {
         JPut(j, ",\"path\":");
         JWstr(j, g_tracks[i].path);
+        JPut(j, ",\"artist\":");
+        JWstr(j, g_tracks[i].artist);
+        JPut(j, ",\"album\":");
+        JWstr(j, g_tracks[i].album);
     }
+    JPut(j, ",\"liked\":");
+    JInt(j, g_tracks[i].liked ? 1 : 0);
+    JPut(j, ",\"plays\":");
+    JInt(j, g_tracks[i].plays);
     JPut(j, ",\"duration\":");
     JInt(j, g_tracks[i].secs < 0 ? 0 : g_tracks[i].secs);
     JChar(j, '}');
@@ -90,19 +99,26 @@ static void TrackJson(HttpJob *j, int i)
 
 static void HttpSearch(HttpJob *j)
 {
+    int first[HTTP_LIMIT];
     int total = 0;
     int n = 0;
-    int first[HTTP_LIMIT];
-    for (int i = 0; i < g_count; ++i) {
-        if (!ContainsI(FileName(g_tracks[i].path), j->q))
-            continue;
-        if (n < HTTP_LIMIT)
-            first[n] = i;
-        n++;
-        total++;
+    if (!j->q[0]) {
+        int q[MAX_TRACKS];
+        total = CollectQueue(q);
+        n = total > HTTP_LIMIT ? HTTP_LIMIT : total;
+        for (int i = 0; i < n; ++i)
+            first[i] = q[i];
+    } else {
+        int ids[HTTP_LIMIT + 1];
+        n = StoreSearch(j->q, ids, HTTP_LIMIT, &total);
+        int w = 0;
+        for (int i = 0; i < n; ++i) {
+            int ix = IndexById(ids[i]);
+            if (ix >= 0)
+                first[w++] = ix;
+        }
+        n = w;
     }
-    if (n > HTTP_LIMIT)
-        n = HTTP_LIMIT;
     JPut(j, "{\"ok\":true,\"query\":");
     JWstr(j, j->q);
     JPut(j, ",\"count\":");
@@ -120,30 +136,98 @@ static void HttpSearch(HttpJob *j)
 
 static void HttpPlay(HttpJob *j)
 {
-    int i = j->id;
-    if (i < 0 && j->q[0]) {
-        for (int t = 0; t < g_count; ++t) {
-            if (ContainsI(FileName(g_tracks[t].path), j->q)) {
-                i = t;
-                break;
-            }
-        }
+    int id = j->id;
+    int i = -1;
+    if (id < 0 && j->q[0]) {
+        int ids[8], total = 0;
+        if (StoreSearch(j->q, ids, 8, &total) > 0)
+            id = ids[0];
     }
-    if (i < 0) {
+    if (id < 0) {
         JErr(j, j->q[0] ? "no match" : "id or q required");
         return;
     }
-    if (!PlayIndex(i, FALSE)) {
+    i = IndexById(id);
+    if (i < 0 || !PlayById(id, FALSE)) {
         JErr(j, "cannot play");
         return;
     }
     JPut(j, "{\"ok\":true,\"id\":");
-    JInt(j, i);
+    JInt(j, g_tracks[i].id);
     JPut(j, ",\"title\":");
-    JWstr(j, FileName(g_tracks[i].path));
+    JWstr(j, TrackTitle(&g_tracks[i]));
+    JPut(j, ",\"liked\":");
+    JInt(j, g_tracks[i].liked ? 1 : 0);
+    JPut(j, ",\"plays\":");
+    JInt(j, g_tracks[i].plays);
     if (!j->slim) {
         JPut(j, ",\"path\":");
         JWstr(j, g_tracks[i].path);
+    }
+    JPut(j, "}");
+}
+
+static void HttpLike(HttpJob *j)
+{
+    int i = j->id >= 0 ? IndexById(j->id) : g_cur;
+    if (i < 0 || i >= g_count) {
+        JErr(j, j->id >= 0 ? "no match" : "nothing playing");
+        return;
+    }
+    if (j->liked >= 0)
+        SetLike(i, j->liked);
+    else
+        ToggleLike(i);
+    JPut(j, "{\"ok\":true,\"id\":");
+    JInt(j, g_tracks[i].id);
+    JPut(j, ",\"liked\":");
+    JInt(j, g_tracks[i].liked ? 1 : 0);
+    JPut(j, ",\"title\":");
+    JWstr(j, TrackTitle(&g_tracks[i]));
+    JPut(j, "}");
+}
+
+static void HttpNow(HttpJob *j)
+{
+    const char *state = "stopped";
+    int pos = 0;
+    if (g_stream) {
+        DWORD act = BASS_ChannelIsActive(g_stream);
+        if (act == BASS_ACTIVE_PLAYING)
+            state = "playing";
+        else if (act == BASS_ACTIVE_PAUSED)
+            state = "paused";
+        QWORD at = BASS_ChannelGetPosition(g_stream, BASS_POS_BYTE);
+        if (at != (QWORD)-1)
+            pos = (int)BASS_ChannelBytes2Seconds(g_stream, at);
+    }
+    JPut(j, "{\"ok\":true,\"state\":");
+    JEsc(j, state);
+    JPut(j, ",\"shuffle\":");
+    JInt(j, g_shuffle ? 1 : 0);
+    if (g_cur < 0 || g_cur >= g_count) {
+        JPut(j, "}");
+        return;
+    }
+    JPut(j, ",\"position\":");
+    JInt(j, pos);
+    JPut(j, ",\"id\":");
+    JInt(j, g_tracks[g_cur].id);
+    JPut(j, ",\"title\":");
+    JWstr(j, TrackTitle(&g_tracks[g_cur]));
+    JPut(j, ",\"artist\":");
+    JWstr(j, g_tracks[g_cur].artist);
+    JPut(j, ",\"album\":");
+    JWstr(j, g_tracks[g_cur].album);
+    JPut(j, ",\"liked\":");
+    JInt(j, g_tracks[g_cur].liked ? 1 : 0);
+    JPut(j, ",\"plays\":");
+    JInt(j, g_tracks[g_cur].plays);
+    JPut(j, ",\"duration\":");
+    JInt(j, g_tracks[g_cur].secs < 0 ? 0 : g_tracks[g_cur].secs);
+    if (!j->slim) {
+        JPut(j, ",\"path\":");
+        JWstr(j, g_tracks[g_cur].path);
     }
     JPut(j, "}");
 }
@@ -152,6 +236,47 @@ static void HttpStop(HttpJob *j)
 {
     StopPlayback();
     JPut(j, "{\"ok\":true}");
+}
+
+static int DirOf(const char *s)
+{
+    if (!s || !s[0])
+        return 1;
+    if (s[0] == 'n' && s[1] == 'e' && s[2] == 'x' && s[3] == 't' && !s[4])
+        return 1;
+    if (s[0] == 'p' && s[1] == 'r' && s[2] == 'e' && s[3] == 'v' && !s[4])
+        return -1;
+    return 0;
+}
+
+static void HttpSkip(HttpJob *j)
+{
+    if (!j->dir) {
+        JErr(j, "bad dir");
+        return;
+    }
+    BOOL ok = j->dir < 0 ? PlayPrev() : PlayNext(TRUE);
+    if (!ok || g_cur < 0 || g_cur >= g_count) {
+        JErr(j, "cannot play");
+        return;
+    }
+    JPut(j, "{\"ok\":true,\"dir\":");
+    JEsc(j, j->dir < 0 ? "prev" : "next");
+    JPut(j, ",\"shuffle\":");
+    JInt(j, g_shuffle ? 1 : 0);
+    JPut(j, ",\"id\":");
+    JInt(j, g_tracks[g_cur].id);
+    JPut(j, ",\"title\":");
+    JWstr(j, TrackTitle(&g_tracks[g_cur]));
+    JPut(j, ",\"liked\":");
+    JInt(j, g_tracks[g_cur].liked ? 1 : 0);
+    JPut(j, ",\"plays\":");
+    JInt(j, g_tracks[g_cur].plays);
+    if (!j->slim) {
+        JPut(j, ",\"path\":");
+        JWstr(j, g_tracks[g_cur].path);
+    }
+    JPut(j, "}");
 }
 
 void HttpOp(HttpJob *j)
@@ -163,6 +288,12 @@ void HttpOp(HttpJob *j)
         HttpPlay(j);
     else if (j->op == HTTP_STOP)
         HttpStop(j);
+    else if (j->op == HTTP_LIKE)
+        HttpLike(j);
+    else if (j->op == HTTP_NOW)
+        HttpNow(j);
+    else if (j->op == HTTP_SKIP)
+        HttpSkip(j);
     else
         JErr(j, "unknown endpoint");
 }
@@ -577,15 +708,48 @@ static void McpTools(HttpJob *j, const char *idraw)
     j->n = 0;
     JPut(j, "{\"jsonrpc\":\"2.0\",\"id\":");
     JPut(j, idraw && idraw[0] ? idraw : "null");
+    JPut(j, ",\"result\":{\"tools\":[");
     JPut(j,
-         ",\"result\":{\"tools\":["
-         "{\"name\":\"search\",\"description\":\"Search playlist titles. Empty query returns the playlist (capped).\","
-         "\"inputSchema\":{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"}}}},"
-         "{\"name\":\"play\",\"description\":\"Play by id (preferred) or first search hit for query.\","
-         "\"inputSchema\":{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"number\"},\"query\":{\"type\":\"string\"}}}},"
-         "{\"name\":\"stop\",\"description\":\"Stop playback (not pause).\","
-         "\"inputSchema\":{\"type\":\"object\",\"properties\":{}}}"
-         "]}}");
+         "{\"name\":\"search\",\"title\":\"Search\","
+         "\"description\":\"Find tracks by title, artist, album, or file name. Empty query lists the queue (max 50). Use id with play.\","
+         "\"inputSchema\":{\"type\":\"object\",\"properties\":{"
+         "\"query\":{\"type\":\"string\",\"description\":\"Match text. Empty lists the queue.\"}"
+         "}},"
+         "\"annotations\":{\"readOnlyHint\":true,\"destructiveHint\":false,\"idempotentHint\":true,\"openWorldHint\":false}},");
+    JPut(j,
+         "{\"name\":\"now\",\"title\":\"Now playing\","
+         "\"description\":\"Current song: state (playing, paused, stopped), title, artist, position. Does not change playback.\","
+         "\"inputSchema\":{\"type\":\"object\",\"properties\":{}},"
+         "\"annotations\":{\"readOnlyHint\":true,\"destructiveHint\":false,\"idempotentHint\":true,\"openWorldHint\":false}},");
+    JPut(j,
+         "{\"name\":\"play\",\"title\":\"Play\","
+         "\"description\":\"Start a track. id preferred; query plays the first hit. Not pause.\","
+         "\"inputSchema\":{\"type\":\"object\",\"properties\":{"
+         "\"id\":{\"type\":\"number\",\"description\":\"Track id.\"},"
+         "\"query\":{\"type\":\"string\",\"description\":\"Search text if id is omitted.\"}"
+         "}},"
+         "\"annotations\":{\"readOnlyHint\":false,\"destructiveHint\":false,\"idempotentHint\":false,\"openWorldHint\":false}},");
+    JPut(j,
+         "{\"name\":\"skip\",\"title\":\"Skip\","
+         "\"description\":\"Next or previous queue track. dir next (default) or prev. Shuffle: next is random. Prev restarts if over 3s in.\","
+         "\"inputSchema\":{\"type\":\"object\",\"properties\":{"
+         "\"dir\":{\"type\":\"string\",\"enum\":[\"next\",\"prev\"],\"description\":\"next or prev.\"}"
+         "}},"
+         "\"annotations\":{\"readOnlyHint\":false,\"destructiveHint\":false,\"idempotentHint\":false,\"openWorldHint\":false}},");
+    JPut(j,
+         "{\"name\":\"like\",\"title\":\"Like\","
+         "\"description\":\"Like or unlike. Omit id for the loaded track. liked 1 or 0 sets; omit to toggle.\","
+         "\"inputSchema\":{\"type\":\"object\",\"properties\":{"
+         "\"id\":{\"type\":\"number\",\"description\":\"Track id. Omit for the loaded track.\"},"
+         "\"liked\":{\"type\":\"number\",\"description\":\"1 like, 0 unlike. Omit to toggle.\"}"
+         "}},"
+         "\"annotations\":{\"readOnlyHint\":false,\"destructiveHint\":false,\"idempotentHint\":false,\"openWorldHint\":false}},");
+    JPut(j,
+         "{\"name\":\"stop\",\"title\":\"Stop\","
+         "\"description\":\"Stop and clear the current track. Not pause.\","
+         "\"inputSchema\":{\"type\":\"object\",\"properties\":{}},"
+         "\"annotations\":{\"readOnlyHint\":false,\"destructiveHint\":false,\"idempotentHint\":true,\"openWorldHint\":false}}");
+    JPut(j, "]}}");
 }
 
 static int McpRun(HttpJob *j)
@@ -612,12 +776,24 @@ static void McpCall(HttpJob *j, const char *idraw, const char *body)
     const char *args = params ? JFind(params, "arguments") : 0;
     j->slim = 1;
     j->id = -1;
+    j->liked = -1;
+    j->dir = 1;
     j->q[0] = 0;
     j->n = 0;
     if (args) {
         const char *idv = JFind(args, "id");
         if (idv)
             j->id = JCopyInt(idv);
+        const char *lv = JFind(args, "liked");
+        if (lv)
+            j->liked = JCopyInt(lv);
+        const char *dv = JFind(args, "dir");
+        if (dv) {
+            char d[16];
+            d[0] = 0;
+            JCopyStr(dv, d, 16);
+            j->dir = DirOf(d);
+        }
         char qutf[256];
         qutf[0] = 0;
         const char *qv = JFind(args, "query");
@@ -629,8 +805,14 @@ static void McpCall(HttpJob *j, const char *idraw, const char *body)
     }
     if (CEq(name, "search"))
         j->op = HTTP_SEARCH;
+    else if (CEq(name, "now"))
+        j->op = HTTP_NOW;
     else if (CEq(name, "play"))
         j->op = HTTP_PLAY;
+    else if (CEq(name, "skip"))
+        j->op = HTTP_SKIP;
+    else if (CEq(name, "like"))
+        j->op = HTTP_LIKE;
     else if (CEq(name, "stop"))
         j->op = HTTP_STOP;
     else {
@@ -661,6 +843,8 @@ static void McpDispatch(SOCKET s, const char *http_m, const char *body)
     HttpJob job;
     memset(&job, 0, sizeof(job));
     job.id = -1;
+    job.liked = -1;
+    job.dir = 1;
     job.cap = 64 * 1024;
     job.out = (char *)HeapAlloc(Heap(), HEAP_ZERO_MEMORY, job.cap);
     if (!job.out) {
@@ -808,6 +992,8 @@ static void HttpClient(SOCKET s)
     HttpJob job;
     memset(&job, 0, sizeof(job));
     job.id = -1;
+    job.liked = -1;
+    job.dir = 1;
     job.cap = 64 * 1024;
     job.out = (char *)HeapAlloc(Heap(), HEAP_ZERO_MEMORY, job.cap);
     if (!job.out) {
@@ -824,6 +1010,22 @@ static void HttpClient(SOCKET s)
         job.op = HTTP_PLAY;
         job.id = QueryInt(qs, "id");
         QueryVal(qs, "q", job.q, 256);
+    } else if (PathEq(path, path_n, "/like")) {
+        job.op = HTTP_LIKE;
+        job.id = QueryInt(qs, "id");
+        job.liked = QueryInt(qs, "liked");
+    } else if (PathEq(path, path_n, "/now")) {
+        job.op = HTTP_NOW;
+    } else if (PathEq(path, path_n, "/skip")) {
+        job.op = HTTP_SKIP;
+        wchar_t dw[16];
+        if (QueryVal(qs, "dir", dw, 16) && dw[0]) {
+            char d[16];
+            if (WideCharToMultiByte(CP_UTF8, 0, dw, -1, d, 16, 0, 0) <= 0)
+                job.dir = 0;
+            else
+                job.dir = DirOf(d);
+        }
     } else if (PathEq(path, path_n, "/stop")) {
         job.op = HTTP_STOP;
     } else {

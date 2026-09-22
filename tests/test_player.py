@@ -2,6 +2,7 @@
 import json
 import os
 import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -21,6 +22,8 @@ SPECIAL = [
     r"C:\iliz_test\ёлка.mp3",
     r"C:\iliz_test\other.mp3",
     r"C:\iliz_test\LoveFolder\zzz.mp3",
+    r"C:\iliz_test\meteor.mp3",
+    r"C:\iliz_test\oxwave.mp3",
 ]
 PADS = 52
 
@@ -78,12 +81,29 @@ class Player:
         app = Path(self.tmp.name)
         pl = app / "iliz" / "iliz_mcp_player"
         pl.mkdir(parents=True)
-        lines = ["#EXTM3U\n"]
-        for p in SPECIAL:
-            lines.append(p + "\n")
-        for i in range(PADS):
-            lines.append(rf"C:\iliz_test\pad_{i:02d}.mp3" + "\n")
-        (pl / "playlist.m3u8").write_text("".join(lines), encoding="utf-8")
+        con = sqlite3.connect(pl / "library.db")
+        con.execute(
+            "CREATE TABLE tracks ("
+            " id INTEGER PRIMARY KEY,"
+            " path TEXT NOT NULL UNIQUE,"
+            " title TEXT NOT NULL DEFAULT '',"
+            " artist TEXT NOT NULL DEFAULT '',"
+            " album TEXT NOT NULL DEFAULT '',"
+            " file TEXT NOT NULL DEFAULT '',"
+            " secs INTEGER NOT NULL DEFAULT -1,"
+            " liked INTEGER NOT NULL DEFAULT 0,"
+            " plays INTEGER NOT NULL DEFAULT 0,"
+            " pos INTEGER)"
+        )
+        paths = list(SPECIAL) + [rf"C:\iliz_test\pad_{i:02d}.mp3" for i in range(PADS)]
+        for i, p in enumerate(paths):
+            name = Path(p).name
+            con.execute(
+                "INSERT INTO tracks(path,title,artist,album,file,pos) VALUES (?,?,?,?,?,?)",
+                (p, name, "", "", name, i),
+            )
+        con.commit()
+        con.close()
         env = os.environ.copy()
         env["APPDATA"] = str(app)
         self.proc = subprocess.Popen(
@@ -136,9 +156,19 @@ class Search(unittest.TestCase):
             ("love", ["love.mp3", "love_song.mp3"]),
             ("LOVE", ["love.mp3", "love_song.mp3"]),
             ("ёлка", ["ёлка.mp3"]),
-            ("Ёлка", []),
+            ("Ёлка", ["ёлка.mp3"]),
+            ("елка", ["ёлка.mp3"]),
+            ("elka", ["ёлка.mp3"]),
             ("zzz", ["zzz.mp3"]),
             ("pad_00", ["pad_00.mp3"]),
+            ("meteor", ["meteor.mp3"]),
+            ("метеор", ["meteor.mp3"]),
+            ("mrteor", ["meteor.mp3"]),
+            ("oxw", ["oxwave.mp3"]),
+            ("wave", ["oxwave.mp3"]),
+            ("оксвэйв", ["oxwave.mp3"]),
+            ("оксвейв", ["oxwave.mp3"]),
+            ("оксвэй", ["oxwave.mp3"]),
             ("nope", []),
         ]
         for q, want in cases:
@@ -160,9 +190,55 @@ class Search(unittest.TestCase):
         got, _ = self.titles("iliz_test")
         self.assertEqual(got, [])
 
-    def test_ids_are_playlist_index(self):
+    def test_ids_are_db_id(self):
         _, body = self.titles("love_song")
-        self.assertEqual(body["tracks"][0]["id"], 1)
+        self.assertEqual(body["tracks"][0]["id"], 2)
+
+    def test_plays_default_zero(self):
+        _, body = self.titles("love_song")
+        self.assertEqual(body["tracks"][0]["plays"], 0)
+
+    def test_like_toggle(self):
+        st, body = P.get("/like?id=1")
+        self.assertEqual(st, 200)
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["liked"], 1)
+        _, body = P.get("/like?id=1")
+        self.assertEqual(body["liked"], 0)
+
+    def test_like_set(self):
+        _, body = P.get("/like?id=1&liked=1")
+        self.assertEqual(body["liked"], 1)
+        _, body = P.get("/like?id=1&liked=1")
+        self.assertEqual(body["liked"], 1)
+        _, body = P.get("/like?id=1&liked=0")
+        self.assertEqual(body["liked"], 0)
+
+    def test_now_stopped(self):
+        st, body = P.get("/now")
+        self.assertEqual(st, 200)
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["state"], "stopped")
+        self.assertEqual(body["shuffle"], 0)
+        self.assertNotIn("id", body)
+
+    def test_like_without_id_idle(self):
+        st, body = P.get("/like")
+        self.assertEqual(st, 200)
+        self.assertFalse(body["ok"])
+        self.assertEqual(body["error"], "nothing playing")
+
+    def test_skip_bad_dir(self):
+        st, body = P.get("/skip?dir=up")
+        self.assertEqual(st, 200)
+        self.assertFalse(body["ok"])
+        self.assertEqual(body["error"], "bad dir")
+
+    def test_skip_default_cannot_play(self):
+        st, body = P.get("/skip")
+        self.assertEqual(st, 200)
+        self.assertFalse(body["ok"])
+        self.assertEqual(body["error"], "cannot play")
 
     def test_404(self):
         with self.assertRaises(urllib.error.HTTPError) as e:
@@ -202,7 +278,9 @@ class Mcp(unittest.TestCase):
         st, body = P.mcp({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
         self.assertEqual(st, 200)
         names = [t["name"] for t in body["result"]["tools"]]
-        self.assertEqual(names, ["search", "play", "stop"])
+        self.assertEqual(names, ["search", "now", "play", "skip", "like", "stop"])
+        skip = next(t for t in body["result"]["tools"] if t["name"] == "skip")
+        self.assertEqual(skip["inputSchema"]["properties"]["dir"]["enum"], ["next", "prev"])
 
     def test_search_matches_rest(self):
         inner, err = self.inner("search", {"query": "love"})
@@ -212,6 +290,32 @@ class Mcp(unittest.TestCase):
         self.assertEqual([t["id"] for t in inner["tracks"]], [t["id"] for t in rest["tracks"]])
         self.assertEqual([t["title"] for t in inner["tracks"]], [t["title"] for t in rest["tracks"]])
         self.assertNotIn("path", inner["tracks"][0])
+
+    def test_now_matches_rest(self):
+        inner, err = self.inner("now")
+        self.assertFalse(err)
+        st, rest = P.get("/now")
+        self.assertEqual(st, 200)
+        self.assertEqual(inner["state"], rest["state"])
+        self.assertNotIn("path", inner)
+
+    def test_like_set_mcp(self):
+        inner, err = self.inner("like", {"id": 2, "liked": 1})
+        self.assertFalse(err)
+        self.assertEqual(inner["liked"], 1)
+        inner, err = self.inner("like", {"id": 2, "liked": 0})
+        self.assertFalse(err)
+        self.assertEqual(inner["liked"], 0)
+
+    def test_skip_bad_dir_mcp(self):
+        inner, err = self.inner("skip", {"dir": "up"})
+        self.assertTrue(err)
+        self.assertEqual(inner["error"], "bad dir")
+
+    def test_skip_prev_mcp(self):
+        inner, err = self.inner("skip", {"dir": "prev"})
+        self.assertTrue(err)
+        self.assertEqual(inner["error"], "cannot play")
 
     def test_unknown_tool(self):
         inner, err = self.inner("nope")

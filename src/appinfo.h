@@ -1,10 +1,10 @@
 #pragma once
 
 #define APP_VER_MAJOR 0
-#define APP_VER_MINOR 9
-#define APP_VER_PATCH 2
+#define APP_VER_MINOR 29
+#define APP_VER_PATCH 0
 
-#define APP_VERSION_A   "0.9.2"
+#define APP_VERSION_A   "0.29.0"
 #define HTTP_PORT       17321
 #define IDI_APP         1
 #define APP_NAME_A      "iliz MCP player"
@@ -18,6 +18,7 @@
 #define APP_WIDEN(s)  APP_WIDEN2(s)
 
 #define APP_VERSION APP_WIDEN(APP_VERSION_A)
-#define APP_NAME    APP_WIDEN(APP_NAME_A)
-#define APP_COMPANY APP_WIDEN(APP_COMPANY_A)
-#define APP_DESC    APP_WIDEN(APP_DESC_A)
+#define APP_NAME     APP_WIDEN(APP_NAME_A)
+#define APP_COMPANY  APP_WIDEN(APP_COMPANY_A)
+#define APP_DESC     APP_WIDEN(APP_DESC_A)
+#define APP_INTERNAL APP_WIDEN(APP_INTERNAL_A)

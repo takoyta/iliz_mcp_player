@@ -1,0 +1,8 @@
+---
+description: Do not rebuild the player after code changes
+alwaysApply: true
+---
+
+# No auto-rebuild
+
+Do not compile, link, or run `build.bat` (or equivalent) after changing player source. Leave the binary as-is unless the user explicitly asks to rebuild.

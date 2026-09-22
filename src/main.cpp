@@ -23,18 +23,21 @@ int     g_vol = 80;
 int     g_vol_pre = 80;
 int     g_press;
 int     g_kbps;
+ULONGLONG g_bytes;
 BOOL    g_exit;
 BOOL    g_solo;
 int     g_http_port = HTTP_PORT;
 BOOL    g_loading;
 BOOL    g_topmost = TRUE;
 BOOL    g_shuffle;
+BOOL    g_liked_only;
+BOOL    g_played_only;
 unsigned g_rng;
 HICON   g_tray_icon;
 UINT    g_taskbar_msg;
 SOCKET  g_http_listen = INVALID_SOCKET;
 
-extern "C" void __stdcall AppEntry()
+int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
 {
-    ExitProcess((UINT)Run());
+    return Run();
 }

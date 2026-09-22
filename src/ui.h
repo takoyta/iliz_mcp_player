@@ -13,6 +13,7 @@ void TrayAdd();
 void TrayDel();
 void TrayTip();
 void RestoreWnd(HWND wnd);
+void ArmTimer();
 void LoadSettings(int *x, int *y);
 void SaveGeom();
 int Run();
