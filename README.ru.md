@@ -6,6 +6,8 @@
 
 Плеер сам отдаёт [MCP](https://modelcontextprotocol.io) для AI-агентов. Cursor, Claude Code и другие могут найти трек, включить его, поставить лайк или переключить дальше, пока окно свёрнуто в трей.
 
+![iliz MCP player](docs/player.png)
+
 ## Система
 
 - Windows 10 / 11 (x64)

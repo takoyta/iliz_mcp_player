@@ -6,6 +6,8 @@ A simple, pleasant Windows player that is easy to use. One window: transport on 
 
 The player is also an [MCP](https://modelcontextprotocol.io) server for AI agents. Cursor, Claude Code, and others can find a track, start it, like it, or skip ahead while the window sits in the tray.
 
+![iliz MCP player](docs/player.png)
+
 ## System
 
 - Windows 10 / 11 (x64)
